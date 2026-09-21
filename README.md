@@ -71,6 +71,7 @@ The server also hosts an interactive Connect Four game at [`/demos/connect-four`
 uv run pytest
 $env:SYSTEMONE_INTEGRATION = "1"; uv run pytest tests/test_integration.py
 uv run python scripts/benchmark.py --questions 4 --runs 5
+uv run python scripts/benchmark_short.py --runs 12
 ```
 
 The server accepts one active inference request and returns HTTP 529 while the GPU is busy. Set `SYSTEMONE_BATCH_SIZE` to tune the number of question branches evaluated together. The public model alias remains fixed; `SYSTEMONE_MODEL_REVISION` may override the pinned checkpoint revision for compatibility testing.

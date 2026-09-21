@@ -8,6 +8,7 @@ import os
 import string
 import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from PIL import Image, ImageOps
@@ -30,6 +31,7 @@ MODEL_ALIAS = "qwen3.5-0.8b-systemone"
 ANSWER_PREFIX = "\nAnswer:"
 MAX_CONTEXT_TOKENS = 8_192
 MAX_SUFFIX_TOKENS = 65_536
+MAX_DIRECT_TEXT_TOKENS = 128
 
 
 class EngineBusyError(RuntimeError):
@@ -48,7 +50,7 @@ class InferenceError(RuntimeError):
 class CompiledQuestion:
     question_id: str
     question: Question
-    input_ids: list[int]
+    input_ids: tuple[int, ...]
     candidate_token_ids: list[int]
 
 
@@ -175,6 +177,29 @@ class SystemOneEngine:
             raise
 
         try:
+            answers: dict[str, Any] = {}
+            batch_size = max(1, self.batch_size)
+            if (
+                not images
+                and len(compiled) <= batch_size
+                and prefix_length + longest <= MAX_DIRECT_TEXT_TOKENS
+            ):
+                logits = self._evaluate_direct_batch(
+                    compiled,
+                    shared_inputs["input_ids"],
+                    shared_inputs["attention_mask"],
+                )
+                for item, values in zip(compiled, logits, strict=True):
+                    answers[item.question_id] = answer_from_logits(
+                        item.question, values
+                    )
+                return SystemOneResponse(
+                    answers=answers,
+                    usage=Usage(
+                        input_tokens=prefix_length + suffix_tokens, output_tokens=0
+                    ),
+                )
+
             with torch.inference_mode():
                 prefix = self.model.model(
                     **shared_inputs, use_cache=True, return_dict=True
@@ -185,9 +210,7 @@ class SystemOneEngine:
                 if self.model.model.rope_deltas is None
                 else self.model.model.rope_deltas.clone()
             )
-            answers: dict[str, Any] = {}
             offset = 0
-            batch_size = max(1, self.batch_size)
             while offset < len(compiled):
                 batch = compiled[offset : offset + batch_size]
                 try:
@@ -222,10 +245,10 @@ class SystemOneEngine:
         self, request: SystemOneRequest, images: list[Image.Image]
     ) -> dict[str, Any]:
         system = (
-            "You are a constrained decision scorer. Read the shared state once. "
-            "For each later question, answer using exactly one supplied internal label and no other text."
+            "Select one listed label for each question using the shared state. "
+            "Answer with that label only."
         )
-        state_text = f"Shared state:\n{_json(_safe(request.state))}"
+        state_text = f"State:\n{_json(_safe(request.state))}"
         if images:
             image_names = ", ".join(attachment.id for attachment in request.attachments)
             content: Any = [*(dict(type="image", image=image) for image in images)]
@@ -240,7 +263,6 @@ class SystemOneEngine:
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": content},
-            {"role": "assistant", "content": "State received."},
         ]
         return self.processor.apply_chat_template(
             messages,
@@ -254,20 +276,12 @@ class SystemOneEngine:
     def _compile(self, question_id: str, question: Question) -> CompiledQuestion:
         if isinstance(question, ChoiceQuestion):
             criteria = [
-                {
-                    "label": self.labels[index][0],
-                    "option": _safe(name),
-                    "description": _safe(description),
-                }
-                for index, (name, description) in enumerate(question.criteria.items())
+                [_safe(name), _safe(description)]
+                for name, description in question.criteria.items()
             ]
         elif isinstance(question, ScoreQuestion):
             criteria = [
-                {
-                    "label": self.labels[index][0],
-                    "level": index,
-                    "description": _safe(description),
-                }
+                [index, _safe(description)]
                 for index, description in enumerate(question.criteria)
             ]
         elif isinstance(question, NoulQuestion):
@@ -275,32 +289,37 @@ class SystemOneEngine:
             true_description = descriptions.true if descriptions else None
             false_description = descriptions.false if descriptions else None
             criteria = [
-                {
-                    "label": self.labels[0][0],
-                    "value": True,
-                    "description": _safe(
-                        "yes" if true_description is None else true_description
-                    ),
-                },
-                {
-                    "label": self.labels[1][0],
-                    "value": False,
-                    "description": _safe(
-                        "no" if false_description is None else false_description
-                    ),
-                },
+                [
+                    True,
+                    _safe("yes" if true_description is None else true_description),
+                ],
+                [
+                    False,
+                    _safe("no" if false_description is None else false_description),
+                ],
             ]
         else:
             raise TypeError(f"unsupported question type: {type(question).__name__}")
 
-        prompt = _json(
-            {
-                "question_type": question.type,
-                "instructions": _safe(question.instructions),
-                "criteria": criteria,
-                "required_output": "one label",
-            }
+        prompt = "\n".join(
+            [f"Question={_json(_safe(question.instructions))}"]
+            + [
+                f"{self.labels[index][0]}={_json(criterion)}"
+                for index, criterion in enumerate(criteria)
+            ]
         )
+        input_ids = self._branch_input_ids(prompt)
+        return CompiledQuestion(
+            question_id=question_id,
+            question=question,
+            input_ids=input_ids,
+            candidate_token_ids=[
+                token_id for _, token_id in self.labels[: len(criteria)]
+            ],
+        )
+
+    @lru_cache(maxsize=256)
+    def _branch_input_ids(self, prompt: str) -> tuple[int, ...]:
         branch = (
             self.processor.apply_chat_template(
                 [{"role": "user", "content": prompt}],
@@ -310,15 +329,81 @@ class SystemOneEngine:
             )
             + ANSWER_PREFIX
         )
-        input_ids = self.processor.tokenizer.encode(branch, add_special_tokens=False)
-        return CompiledQuestion(
-            question_id=question_id,
-            question=question,
-            input_ids=input_ids,
-            candidate_token_ids=[
-                token_id for _, token_id in self.labels[: len(criteria)]
-            ],
+        return tuple(
+            self.processor.tokenizer.encode(branch, add_special_tokens=False)
         )
+
+    @staticmethod
+    def _fork_cache(base_cache: Any, count: int, device: Any) -> Any:
+        """Copy cache metadata and expand each tensor directly from the shared row."""
+        import torch
+
+        cache = copy.copy(base_cache)
+        cache.layers = [copy.copy(layer) for layer in base_cache.layers]
+        for layer in cache.layers:
+            for name, value in vars(layer).items():
+                if isinstance(value, dict):
+                    setattr(layer, name, value.copy())
+        cache.reorder_cache(torch.zeros(count, dtype=torch.long, device=device))
+        return cache
+
+    def _evaluate_direct_batch(
+        self,
+        batch: list[CompiledQuestion],
+        prefix_ids: Any,
+        prefix_mask: Any,
+    ) -> list[list[float]]:
+        import torch
+
+        count = len(batch)
+        prefix_length = int(prefix_ids.shape[1])
+        lengths = torch.tensor(
+            [prefix_length + len(item.input_ids) for item in batch],
+            device=self.device,
+        )
+        width = int(lengths.max().item())
+        input_ids = torch.full(
+            (count, width),
+            self.processor.tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=self.device,
+        )
+        attention_mask = torch.zeros_like(input_ids)
+        input_ids[:, :prefix_length] = prefix_ids.repeat(count, 1)
+        attention_mask[:, :prefix_length] = prefix_mask.repeat(count, 1)
+        for row, item in enumerate(batch):
+            end = prefix_length + len(item.input_ids)
+            input_ids[row, prefix_length:end] = torch.tensor(
+                item.input_ids, device=self.device
+            )
+            attention_mask[row, prefix_length:end] = 1
+
+        with torch.inference_mode():
+            output = self.model.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                return_dict=True,
+            )
+        final_hidden = output.last_hidden_state[
+            torch.arange(count, device=self.device), lengths - 1
+        ].float()
+        return self._project_candidates(batch, final_hidden)
+
+    def _project_candidates(
+        self, batch: list[CompiledQuestion], final_hidden: Any
+    ) -> list[list[float]]:
+        import torch
+
+        weight = self.model.lm_head.weight
+        results: list[list[float]] = []
+        for row, item in enumerate(batch):
+            candidate_ids = torch.tensor(item.candidate_token_ids, device=self.device)
+            logits = torch.mv(
+                weight.index_select(0, candidate_ids).float(), final_hidden[row]
+            )
+            results.append(logits.cpu().tolist())
+        return results
 
     def _evaluate_batch(
         self,
@@ -351,8 +436,7 @@ class SystemOneEngine:
             delta = rope_deltas.repeat_interleave(count, dim=0).view(1, count, 1)
             positions = positions.unsqueeze(0).expand(3, -1, -1) + delta
 
-        cache = copy.deepcopy(base_cache)
-        cache.reorder_cache(torch.zeros(count, dtype=torch.long, device=self.device))
+        cache = self._fork_cache(base_cache, count, self.device)
         self.model.model.rope_deltas = rope_deltas
         with torch.inference_mode():
             output = self.model.model(
@@ -366,15 +450,7 @@ class SystemOneEngine:
         final_hidden = output.last_hidden_state[
             torch.arange(count, device=self.device), lengths - 1
         ].float()
-        weight = self.model.lm_head.weight
-        results: list[list[float]] = []
-        for row, item in enumerate(batch):
-            candidate_ids = torch.tensor(item.candidate_token_ids, device=self.device)
-            logits = torch.mv(
-                weight.index_select(0, candidate_ids).float(), final_hidden[row]
-            )
-            results.append(logits.cpu().tolist())
-        return results
+        return self._project_candidates(batch, final_hidden)
 
     @staticmethod
     def _decode_image(attachment: Attachment) -> Image.Image:

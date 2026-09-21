@@ -64,6 +64,7 @@ The question can refer to an attachment by its `id`. Images are processed by Qwe
 
 Ready-to-run text, Turkish, vision, independence, and 255-option demos are in [`examples`](examples/README.md).
 The server also hosts an interactive Connect Four game at [`/demos/connect-four`](http://127.0.0.1:8000/demos/connect-four).
+The Chrome Dino visual controller publishes its live decision trace at [`/demos/dino`](http://127.0.0.1:8000/demos/dino).
 
 ## Development
 
@@ -75,3 +76,4 @@ uv run python scripts/benchmark_short.py --runs 12
 ```
 
 The server accepts one active inference request and returns HTTP 529 while the GPU is busy. Set `SYSTEMONE_BATCH_SIZE` to tune the number of question branches evaluated together. The public model alias remains fixed; `SYSTEMONE_MODEL_REVISION` may override the pinned checkpoint revision for compatibility testing.
+`SYSTEMONE_IMAGE_MIN_PIXELS` can lower Qwen's image-resize floor for deliberately low-resolution visual-control workloads; the Chrome Dino example uses `4096`.

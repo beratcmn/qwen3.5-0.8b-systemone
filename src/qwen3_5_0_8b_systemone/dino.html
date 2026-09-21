@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>System One · Dino Vision</title>
+    <style>
+      :root {
+        --ground: #090a0b;
+        --ink: #f1efe7;
+        --muted: #858783;
+        --line: #292b29;
+        --soft-line: #1b1d1b;
+        --signal: #f4c95d;
+        --wait: #8b8e89;
+        --jump: #f4c95d;
+        --duck: #73cbb5;
+        --restart: #ef7d68;
+        --good: #72d6a1;
+      }
+
+      * { box-sizing: border-box; }
+      html { background: var(--ground); }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        color: var(--ink);
+        background:
+          linear-gradient(rgb(255 255 255 / 2%) 1px, transparent 1px) 0 0 / 100% 32px,
+          var(--ground);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .shell {
+        width: min(1380px, calc(100% - 48px));
+        margin: 0 auto;
+        padding-bottom: 32px;
+      }
+
+      header {
+        min-height: 86px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand { display: flex; align-items: baseline; gap: 14px; }
+      .brand strong { font-size: 22px; letter-spacing: -0.045em; }
+      .brand span,
+      .eyebrow,
+      .label {
+        color: var(--muted);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .status { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+      .status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #5d605d;
+        box-shadow: 0 0 0 4px rgb(93 96 93 / 12%);
+      }
+      .status-dot.live {
+        background: var(--good);
+        box-shadow: 0 0 0 4px rgb(114 214 161 / 12%);
+        animation: breathe 1.2s ease-in-out infinite alternate;
+      }
+      .status-dot.error { background: var(--restart); }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(600px, 1.45fr) minmax(300px, 0.55fr);
+        min-height: calc(100vh - 118px);
+        gap: clamp(34px, 5vw, 72px);
+        padding: 40px 0 18px;
+      }
+
+      .feed,
+      .inspector { animation: enter 520ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+      .inspector { animation-delay: 80ms; }
+
+      .feed-head {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 28px;
+        margin-bottom: 20px;
+      }
+      h1 {
+        max-width: 720px;
+        margin: 7px 0 0;
+        font-size: clamp(38px, 5.4vw, 72px);
+        line-height: 0.9;
+        letter-spacing: -0.07em;
+        font-weight: 650;
+      }
+      .sequence {
+        min-width: 120px;
+        text-align: right;
+        color: var(--muted);
+        font: 12px "SFMono-Regular", Consolas, monospace;
+      }
+      .sequence strong { display: block; margin-top: 5px; color: var(--ink); font-size: 20px; font-weight: 500; }
+
+      .viewport {
+        position: relative;
+        overflow: hidden;
+        min-height: 230px;
+        display: grid;
+        place-items: center;
+        border: 1px solid #3a3c38;
+        background: #e9e8e2;
+        box-shadow: 0 32px 80px rgb(0 0 0 / 35%);
+      }
+      .viewport::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: repeating-linear-gradient(0deg, rgb(0 0 0 / 4%) 0 1px, transparent 1px 4px);
+        mix-blend-mode: multiply;
+      }
+      .frame {
+        display: none;
+        width: 100%;
+        height: auto;
+        image-rendering: pixelated;
+        animation: frame-in 180ms ease-out both;
+      }
+      .frame.visible { display: block; }
+      .empty-feed { max-width: 400px; padding: 52px 28px; color: #565853; text-align: center; line-height: 1.55; }
+      .time-labels {
+        position: absolute;
+        z-index: 2;
+        inset: 12px 14px auto;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        color: #343632;
+        font: 10px "SFMono-Regular", Consolas, monospace;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+        pointer-events: none;
+      }
+      .time-labels span:last-child { text-align: right; }
+      .frame-divider { position: absolute; z-index: 2; inset: 0 auto 0 50%; width: 1px; background: rgb(12 13 12 / 28%); }
+
+      .action-band {
+        display: grid;
+        grid-template-columns: minmax(190px, 0.7fr) 1fr;
+        gap: 28px;
+        align-items: center;
+        padding: 23px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .current-action strong {
+        display: block;
+        margin-top: 5px;
+        color: var(--signal);
+        font: 500 clamp(30px, 4vw, 50px) "SFMono-Regular", Consolas, monospace;
+        letter-spacing: -0.06em;
+        text-transform: uppercase;
+      }
+      .current-action strong.pulse { animation: action-pulse 320ms cubic-bezier(0.22, 1, 0.36, 1); }
+      .guard-copy { color: var(--muted); font-size: 13px; line-height: 1.55; }
+      .guard-copy b { color: var(--ink); font-weight: 550; }
+
+      .trace-wrap { padding-top: 24px; }
+      .trace-head { display: flex; align-items: baseline; justify-content: space-between; gap: 20px; }
+      .trace-head h2 { margin: 5px 0 0; font-size: 21px; letter-spacing: -0.04em; }
+      .legend { display: flex; gap: 14px; color: var(--muted); font-size: 11px; }
+      .legend span { display: flex; align-items: center; gap: 6px; }
+      .legend i { width: 7px; height: 7px; border-radius: 50%; background: var(--color); }
+      .trace {
+        height: 96px;
+        display: flex;
+        align-items: end;
+        gap: 3px;
+        margin-top: 17px;
+        padding-top: 10px;
+        border-top: 1px solid var(--soft-line);
+        border-bottom: 1px solid var(--line);
+      }
+      .trace-bar {
+        flex: 1 1 0;
+        min-width: 2px;
+        max-width: 15px;
+        height: calc(10% + var(--probability) * 72%);
+        background: var(--color);
+        opacity: 0.78;
+        transform-origin: bottom;
+        animation: grow 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+
+      .inspector {
+        display: flex;
+        flex-direction: column;
+        padding-left: clamp(0px, 2vw, 28px);
+        border-left: 1px solid var(--line);
+      }
+      .metrics {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        padding-bottom: 22px;
+        border-bottom: 1px solid var(--line);
+      }
+      .metric strong {
+        display: block;
+        margin-top: 5px;
+        font: 500 30px "SFMono-Regular", Consolas, monospace;
+        letter-spacing: -0.06em;
+      }
+      .probabilities { padding: 26px 0 18px; border-bottom: 1px solid var(--line); }
+      .probability {
+        display: grid;
+        grid-template-columns: 66px 1fr 48px;
+        align-items: center;
+        gap: 11px;
+        margin: 15px 0;
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+      .probability.selected { color: var(--color); }
+      .rail { height: 3px; background: #2a2c29; overflow: hidden; }
+      .rail i { display: block; width: 0; height: 100%; background: currentColor; transition: width 380ms cubic-bezier(0.22, 1, 0.36, 1); }
+      .probability output { font: 11px "SFMono-Regular", Consolas, monospace; text-align: right; }
+
+      .events { padding-top: 24px; }
+      .events h2 { margin: 5px 0 15px; font-size: 20px; letter-spacing: -0.04em; }
+      .event {
+        display: grid;
+        grid-template-columns: 34px 68px 1fr 58px;
+        gap: 9px;
+        padding: 9px 0;
+        border-top: 1px solid var(--soft-line);
+        color: var(--muted);
+        font: 11px "SFMono-Regular", Consolas, monospace;
+      }
+      .event b { color: var(--color); font-weight: 600; text-transform: uppercase; }
+      .event span:nth-child(3) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .event span:last-child { text-align: right; }
+      .error { color: var(--restart); }
+
+      @keyframes enter { from { opacity: 0; transform: translateY(16px); } }
+      @keyframes frame-in { from { opacity: 0.3; transform: scale(1.006); } }
+      @keyframes grow { from { transform: scaleY(0); } }
+      @keyframes action-pulse { 0% { transform: translateY(5px); opacity: 0.35; } }
+      @keyframes breathe { to { opacity: 0.45; } }
+
+      @media (max-width: 980px) {
+        .shell { width: min(760px, calc(100% - 30px)); }
+        main { grid-template-columns: 1fr; min-height: auto; }
+        .inspector { padding: 30px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+      }
+      @media (max-width: 580px) {
+        .shell { width: min(100% - 20px, 520px); }
+        header { min-height: 70px; }
+        .brand span, .status span { display: none; }
+        main { padding-top: 27px; }
+        .feed-head { align-items: start; }
+        .sequence { min-width: 74px; }
+        .viewport { min-height: 145px; }
+        .action-band { grid-template-columns: 1fr; gap: 10px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div class="brand"><strong>DINO / VISION</strong><span>System One policy monitor</span></div>
+        <div class="status"><i class="status-dot" id="status-dot"></i><span id="status-copy">Waiting for controller</span></div>
+      </header>
+
+      <main>
+        <section class="feed">
+          <div class="feed-head">
+            <div><span class="eyebrow">Live visual input</span><h1>See what the model sees.</h1></div>
+            <div class="sequence"><span>Decision</span><strong id="sequence">—</strong></div>
+          </div>
+
+          <div class="viewport">
+            <p class="empty-feed" id="empty-feed">Run <code>uv run python examples/dino_player.py</code>, then select the visible Chrome Dino playfield.</p>
+            <img class="frame" id="frame" alt="Previous and current Dino game frames" />
+            <div class="time-labels" id="time-labels"><span>Previous</span><span>Current</span></div>
+            <i class="frame-divider"></i>
+          </div>
+
+          <div class="action-band">
+            <div class="current-action"><span class="label">Executed action</span><strong id="action">Idle</strong></div>
+            <div class="guard-copy" id="guard-copy">The controller publishes the model choice and the action actually sent to Chrome. Confidence and cooldown guards remain visible.</div>
+          </div>
+
+          <div class="trace-wrap">
+            <div class="trace-head">
+              <div><span class="label">Recent decisions</span><h2>Action confidence over time</h2></div>
+              <div class="legend">
+                <span style="--color: var(--wait)"><i></i>Wait</span>
+                <span style="--color: var(--jump)"><i></i>Jump</span>
+                <span style="--color: var(--duck)"><i></i>Duck</span>
+                <span style="--color: var(--restart)"><i></i>Restart</span>
+              </div>
+            </div>
+            <div class="trace" id="trace"></div>
+          </div>
+        </section>
+
+        <aside class="inspector">
+          <div class="metrics">
+            <div class="metric"><span class="label">Confidence</span><strong id="confidence">—</strong></div>
+            <div class="metric"><span class="label">Latency</span><strong id="latency">—</strong></div>
+          </div>
+          <div class="probabilities" id="probabilities">
+            <span class="label">Action probabilities</span>
+          </div>
+          <div class="events">
+            <span class="label">Decision log</span>
+            <h2>Latest model actions</h2>
+            <div id="events"><p class="guard-copy">No decisions yet.</p></div>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <script>
+      const colors = { wait: "var(--wait)", jump: "var(--jump)", duck: "var(--duck)", restart: "var(--restart)" };
+      let revision = -1;
+      const frame = document.querySelector("#frame");
+      const action = document.querySelector("#action");
+
+      function renderProbability(name, probability, selected) {
+        return `<div class="probability ${selected ? "selected" : ""}" style="--color:${colors[name]}">
+          <span>${name}</span><div class="rail"><i data-width="${probability * 100}"></i></div>
+          <output>${(probability * 100).toFixed(1)}%</output></div>`;
+      }
+
+      function render(state) {
+        const dot = document.querySelector("#status-dot");
+        dot.className = `status-dot ${state.status === "running" ? "live" : state.status === "error" ? "error" : ""}`;
+        document.querySelector("#status-copy").textContent = state.error || state.status.replace("_", " ");
+        const latest = state.latest;
+        if (!latest) return;
+
+        document.querySelector("#empty-feed").style.display = "none";
+        frame.src = `data:image/png;base64,${latest.frame_base64}`;
+        frame.classList.remove("visible");
+        requestAnimationFrame(() => frame.classList.add("visible"));
+        const labels = document.querySelector("#time-labels");
+        labels.innerHTML = latest.frame_count === 2 ? "<span>Previous</span><span>Current</span>" : "<span></span><span>Current</span>";
+        document.querySelector(".frame-divider").style.display = latest.frame_count === 2 ? "block" : "none";
+        document.querySelector("#sequence").textContent = String(latest.sequence).padStart(4, "0");
+        action.textContent = latest.executed_action;
+        action.style.color = colors[latest.executed_action];
+        action.classList.remove("pulse");
+        requestAnimationFrame(() => action.classList.add("pulse"));
+        document.querySelector("#confidence").textContent = `${Math.round(latest.confidence * 100)}%`;
+        document.querySelector("#latency").textContent = `${Math.round(latest.latency_ms)}ms`;
+        document.querySelector("#guard-copy").innerHTML = latest.model_action === latest.executed_action
+          ? `Model and controller agree on <b>${latest.model_action}</b>.`
+          : `Model chose <b>${latest.model_action}</b>; the controller executed <b>${latest.executed_action}</b> after confidence and cooldown guards.`;
+
+        const order = ["wait", "jump", "duck", "restart"];
+        document.querySelector("#probabilities").innerHTML = `<span class="label">Action probabilities</span>${order
+          .map((name) => renderProbability(name, latest.probabilities[name] || 0, name === latest.model_action))
+          .join("")}`;
+        requestAnimationFrame(() => document.querySelectorAll(".rail i").forEach((bar) => { bar.style.width = `${bar.dataset.width}%`; }));
+
+        const history = state.history.slice(-48);
+        document.querySelector("#trace").innerHTML = history.map((item) => {
+          const probability = item.probabilities?.[item.model_action] || 0;
+          return `<i class="trace-bar" title="#${item.sequence} ${item.model_action} ${(probability * 100).toFixed(1)}%" style="--color:${colors[item.model_action]};--probability:${probability}"></i>`;
+        }).join("");
+        document.querySelector("#events").innerHTML = history.slice(-8).reverse().map((item) => {
+          const guarded = item.model_action === item.executed_action ? "sent" : `→ ${item.executed_action}`;
+          return `<div class="event" style="--color:${colors[item.model_action]}"><span>#${item.sequence}</span><b>${item.model_action}</b><span>${guarded}</span><span>${Math.round(item.latency_ms)}ms</span></div>`;
+        }).join("");
+      }
+
+      async function poll() {
+        try {
+          const response = await fetch("/v1/dino/telemetry", { cache: "no-store" });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const state = await response.json();
+          if (state.revision !== revision) { revision = state.revision; render(state); }
+        } catch (error) {
+          document.querySelector("#status-dot").className = "status-dot error";
+          document.querySelector("#status-copy").textContent = `Dashboard disconnected: ${error.message}`;
+        }
+      }
+
+      poll();
+      window.setInterval(poll, 220);
+    </script>
+  </body>
+</html>

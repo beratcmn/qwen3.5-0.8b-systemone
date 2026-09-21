@@ -31,7 +31,8 @@ MODEL_ALIAS = "qwen3.5-0.8b-systemone"
 ANSWER_PREFIX = "\nAnswer:"
 MAX_CONTEXT_TOKENS = 8_192
 MAX_SUFFIX_TOKENS = 65_536
-MAX_DIRECT_TEXT_TOKENS = 128
+MAX_DIRECT_INPUT_TOKENS = 128
+MAX_DIRECT_SINGLE_INPUT_TOKENS = 256
 
 
 class EngineBusyError(RuntimeError):
@@ -99,6 +100,12 @@ class SystemOneEngine:
             self.device = torch.device("cuda")
             revision = os.getenv("SYSTEMONE_MODEL_REVISION", MODEL_REVISION)
             self.processor = AutoProcessor.from_pretrained(MODEL_ID, revision=revision)
+            image_min_pixels = os.getenv("SYSTEMONE_IMAGE_MIN_PIXELS")
+            if image_min_pixels:
+                self.processor.image_processor.size.shortest_edge = int(
+                    image_min_pixels
+                )
+                print(f"Qwen3.5 System One image minimum: {image_min_pixels} pixels")
             self.model = Qwen3_5ForConditionalGeneration.from_pretrained(
                 MODEL_ID,
                 revision=revision,
@@ -179,15 +186,19 @@ class SystemOneEngine:
         try:
             answers: dict[str, Any] = {}
             batch_size = max(1, self.batch_size)
-            if (
+            direct_single = (
+                len(compiled) == 1
+                and prefix_length + longest <= MAX_DIRECT_SINGLE_INPUT_TOKENS
+            )
+            direct_short_text = (
                 not images
                 and len(compiled) <= batch_size
-                and prefix_length + longest <= MAX_DIRECT_TEXT_TOKENS
-            ):
+                and prefix_length + longest <= MAX_DIRECT_INPUT_TOKENS
+            )
+            if direct_single or direct_short_text:
                 logits = self._evaluate_direct_batch(
                     compiled,
-                    shared_inputs["input_ids"],
-                    shared_inputs["attention_mask"],
+                    shared_inputs,
                 )
                 for item, values in zip(compiled, logits, strict=True):
                     answers[item.question_id] = answer_from_logits(
@@ -350,11 +361,12 @@ class SystemOneEngine:
     def _evaluate_direct_batch(
         self,
         batch: list[CompiledQuestion],
-        prefix_ids: Any,
-        prefix_mask: Any,
+        shared_inputs: dict[str, Any],
     ) -> list[list[float]]:
         import torch
 
+        prefix_ids = shared_inputs["input_ids"]
+        prefix_mask = shared_inputs["attention_mask"]
         count = len(batch)
         prefix_length = int(prefix_ids.shape[1])
         lengths = torch.tensor(
@@ -378,10 +390,29 @@ class SystemOneEngine:
             )
             attention_mask[row, prefix_length:end] = 1
 
+        model_inputs = {
+            key: value
+            for key, value in shared_inputs.items()
+            if key
+            not in {
+                "input_ids",
+                "attention_mask",
+                "token_type_ids",
+                "mm_token_type_ids",
+            }
+        }
+        for name in ("token_type_ids", "mm_token_type_ids"):
+            if name not in shared_inputs:
+                continue
+            token_type_ids = torch.zeros_like(input_ids)
+            token_type_ids[:, :prefix_length] = shared_inputs[name].repeat(count, 1)
+            model_inputs[name] = token_type_ids
+
         with torch.inference_mode():
             output = self.model.model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                **model_inputs,
                 use_cache=False,
                 return_dict=True,
             )

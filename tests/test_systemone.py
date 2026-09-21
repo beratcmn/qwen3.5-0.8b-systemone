@@ -118,6 +118,44 @@ def test_connect_four_demo_is_served() -> None:
     asyncio.run(check())
 
 
+def test_dino_dashboard_tracks_controller_telemetry() -> None:
+    async def check() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            response = await client.get("/demos/dino")
+            assert response.status_code == 200
+            assert "DINO / VISION" in response.text
+
+            update = {
+                "session_id": "test-session",
+                "sequence": 1,
+                "captured_at": 1.0,
+                "status": "running",
+                "frame_base64": "cG5n",
+                "model_action": "jump",
+                "executed_action": "jump",
+                "probabilities": {
+                    "wait": 0.1,
+                    "jump": 0.7,
+                    "duck": 0.1,
+                    "restart": 0.1,
+                },
+                "confidence": 0.6,
+                "latency_ms": 180.0,
+            }
+            response = await client.post("/v1/dino/telemetry", json=update)
+            assert response.status_code == 200
+            response = await client.get("/v1/dino/telemetry")
+            state = response.json()
+            assert state["status"] == "running"
+            assert state["latest"]["model_action"] == "jump"
+            assert "frame_base64" not in state["history"][-1]
+
+    asyncio.run(check())
+
+
 def test_rejects_nonfinite_nested_number() -> None:
     payload = {
         "model": "qwen3.5-0.8b-systemone",

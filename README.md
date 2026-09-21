@@ -63,6 +63,7 @@ Images can be supplied as up to four base64-encoded PNG, JPEG, or static WebP at
 The question can refer to an attachment by its `id`. Images are processed by Qwen's native vision path.
 
 Ready-to-run text, Turkish, vision, independence, and 255-option demos are in [`examples`](examples/README.md).
+The server also hosts an interactive Connect Four game at [`/demos/connect-four`](http://127.0.0.1:8000/demos/connect-four).
 
 ## Development
 

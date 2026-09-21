@@ -104,6 +104,20 @@ def test_api_rejects_duplicate_keys_and_serves_response(
     asyncio.run(check())
 
 
+def test_connect_four_demo_is_served() -> None:
+    async def check() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            response = await client.get("/demos/connect-four")
+            assert response.status_code == 200
+            assert "System One · Connect Four" in response.text
+            assert 'fetch("/v1/systemone"' in response.text
+
+    asyncio.run(check())
+
+
 def test_rejects_nonfinite_nested_number() -> None:
     payload = {
         "model": "qwen3.5-0.8b-systemone",

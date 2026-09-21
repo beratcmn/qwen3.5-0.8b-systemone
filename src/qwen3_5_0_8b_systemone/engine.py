@@ -76,7 +76,8 @@ class SystemOneEngine:
         self.labels: list[tuple[str, int]] = []
         self._inference_lock = threading.Lock()
         self._load_lock = threading.Lock()
-        self.batch_size = int(os.getenv("SYSTEMONE_BATCH_SIZE", "4"))
+        self.batch_size = int(os.getenv("SYSTEMONE_BATCH_SIZE", "16"))
+        print(f"Qwen3.5 System One batch size: {self.batch_size}")
 
     @property
     def loaded(self) -> bool:

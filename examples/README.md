@@ -6,6 +6,8 @@ Start the API in one terminal:
 uv run qwen3-5-0-8b-systemone
 ```
 
+Open the interactive Connect Four demo at [http://127.0.0.1:8000/demos/connect-four](http://127.0.0.1:8000/demos/connect-four). You play coral; Qwen plays yellow and shows its complete move distribution after every turn.
+
 Run examples from the repository root in another terminal:
 
 ```powershell

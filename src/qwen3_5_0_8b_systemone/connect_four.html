@@ -1,0 +1,965 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>System One · Connect Four</title>
+    <style>
+      :root {
+        --ink: #f4f1ea;
+        --muted: #9b9ca4;
+        --ground: #090a0d;
+        --surface: #12141a;
+        --line: #292c35;
+        --board: #2455d6;
+        --board-edge: #17399a;
+        --human: #ff6257;
+        --qwen: #f0ce49;
+        --good: #5fd49b;
+        --radius: 24px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        background: var(--ground);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        color: var(--ink);
+        background: var(--ground);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+      }
+
+      button {
+        color: inherit;
+        font: inherit;
+      }
+
+      .shell {
+        width: min(1240px, calc(100% - 48px));
+        margin: 0 auto;
+        padding-bottom: 36px;
+      }
+
+      header {
+        min-height: 92px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand {
+        display: flex;
+        align-items: baseline;
+        gap: 14px;
+      }
+
+      .brand strong {
+        font-size: clamp(18px, 2vw, 24px);
+        letter-spacing: -0.04em;
+      }
+
+      .brand span,
+      .eyebrow,
+      .label {
+        color: var(--muted);
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        font-size: 11px;
+        letter-spacing: 0.13em;
+        text-transform: uppercase;
+      }
+
+      .server-state {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .server-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #60636c;
+        box-shadow: 0 0 0 4px rgb(96 99 108 / 12%);
+      }
+
+      .server-dot.ready {
+        background: var(--good);
+        box-shadow: 0 0 0 4px rgb(95 212 155 / 12%);
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(480px, 1fr) minmax(290px, 0.52fr);
+        gap: clamp(36px, 6vw, 88px);
+        align-items: center;
+        min-height: calc(100vh - 128px);
+        padding: 42px 0;
+      }
+
+      .game-stage,
+      .inspector {
+        animation: enter 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+
+      .inspector {
+        animation-delay: 90ms;
+      }
+
+      .game-heading {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 22px;
+      }
+
+      h1 {
+        max-width: 650px;
+        margin: 7px 0 0;
+        font-size: clamp(38px, 5vw, 70px);
+        font-weight: 650;
+        letter-spacing: -0.065em;
+        line-height: 0.92;
+      }
+
+      .turn-copy {
+        max-width: 190px;
+        margin: 0;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+        text-align: right;
+      }
+
+      .turn-copy strong {
+        color: var(--ink);
+        font-weight: 600;
+      }
+
+      .board-wrap {
+        position: relative;
+        width: min(100%, 690px);
+      }
+
+      .column-numbers {
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        padding: 0 17px 10px;
+        color: #747783;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: 11px;
+        text-align: center;
+      }
+
+      .board {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(7, 1fr);
+        gap: clamp(7px, 1.25vw, 13px);
+        width: 100%;
+        aspect-ratio: 7 / 6;
+        padding: clamp(12px, 2vw, 20px);
+        border: 1px solid #3970f3;
+        border-bottom: 9px solid var(--board-edge);
+        border-radius: var(--radius);
+        background: var(--board);
+        box-shadow: 0 34px 80px rgb(0 0 0 / 38%);
+      }
+
+      .cell {
+        position: relative;
+        display: grid;
+        place-items: center;
+        min-width: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 50%;
+        background: #0b1020;
+        box-shadow:
+          inset 0 5px 11px rgb(0 0 0 / 58%),
+          0 1px 0 rgb(255 255 255 / 12%);
+        cursor: pointer;
+      }
+
+      .cell::after {
+        content: "";
+        position: absolute;
+        inset: 7%;
+        border-radius: 50%;
+        opacity: 0;
+        transform: scale(0.72);
+        transition:
+          opacity 150ms ease,
+          transform 150ms ease;
+      }
+
+      .cell.preview::after {
+        background: var(--human);
+        opacity: 0.32;
+        transform: scale(1);
+      }
+
+      .cell:focus-visible {
+        outline: 3px solid var(--ink);
+        outline-offset: 3px;
+      }
+
+      .cell:disabled {
+        cursor: default;
+      }
+
+      .disc {
+        position: absolute;
+        inset: 7%;
+        border-radius: 50%;
+        box-shadow:
+          inset 0 -6px 12px rgb(0 0 0 / 22%),
+          inset 0 4px 7px rgb(255 255 255 / 28%),
+          0 5px 11px rgb(0 0 0 / 24%);
+      }
+
+      .disc.human {
+        background: var(--human);
+      }
+
+      .disc.qwen {
+        background: var(--qwen);
+      }
+
+      .disc.drop {
+        animation: drop 520ms cubic-bezier(0.34, 1.28, 0.5, 1) both;
+      }
+
+      .disc.winner {
+        outline: 4px solid var(--ink);
+        outline-offset: -4px;
+        animation: win 900ms ease-in-out infinite alternate;
+      }
+
+      .board.thinking::before {
+        content: "";
+        position: absolute;
+        z-index: 3;
+        inset: 0;
+        border-radius: var(--radius);
+        background: rgb(6 9 17 / 38%);
+        pointer-events: none;
+      }
+
+      .thinking-mark {
+        position: absolute;
+        z-index: 4;
+        inset: 50% auto auto 50%;
+        display: none;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 16px;
+        border: 1px solid rgb(255 255 255 / 20%);
+        border-radius: 999px;
+        background: #0c0e13;
+        transform: translate(-50%, -50%);
+        font-size: 13px;
+        box-shadow: 0 16px 40px rgb(0 0 0 / 45%);
+      }
+
+      .thinking-mark.visible {
+        display: flex;
+      }
+
+      .thinking-mark i {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--qwen);
+        animation: pulse 700ms ease-in-out infinite alternate;
+      }
+
+      .legend {
+        display: flex;
+        gap: 22px;
+        margin-top: 18px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .legend span {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .legend i {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+
+      .inspector {
+        align-self: stretch;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding-left: clamp(0px, 2vw, 28px);
+        border-left: 1px solid var(--line);
+      }
+
+      .inspector-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      h2 {
+        margin: 5px 0 0;
+        font-size: 25px;
+        letter-spacing: -0.045em;
+      }
+
+      .new-game,
+      .retry {
+        border: 1px solid #3a3d47;
+        border-radius: 999px;
+        background: transparent;
+        padding: 9px 14px;
+        font-size: 12px;
+        cursor: pointer;
+        transition:
+          background 150ms ease,
+          border-color 150ms ease,
+          transform 150ms ease;
+      }
+
+      .new-game:hover,
+      .retry:hover {
+        border-color: #777b87;
+        background: #191b22;
+        transform: translateY(-1px);
+      }
+
+      .decision-summary {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+        padding: 25px 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .metric strong {
+        display: block;
+        margin-top: 6px;
+        font-family: "SFMono-Regular", Consolas, monospace;
+        font-size: clamp(26px, 3vw, 38px);
+        font-weight: 500;
+        letter-spacing: -0.06em;
+      }
+
+      .probabilities {
+        min-height: 255px;
+        padding: 24px 0 8px;
+      }
+
+      .empty-state {
+        max-width: 290px;
+        margin: 44px 0;
+        color: #767986;
+        font-size: 14px;
+        line-height: 1.6;
+      }
+
+      .probability {
+        display: grid;
+        grid-template-columns: 76px 1fr 52px;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 14px;
+        font-size: 13px;
+      }
+
+      .probability.selected {
+        color: var(--qwen);
+      }
+
+      .track {
+        height: 3px;
+        overflow: hidden;
+        background: #292c34;
+      }
+
+      .fill {
+        width: 0;
+        height: 100%;
+        background: currentColor;
+        transition: width 700ms cubic-bezier(0.22, 1, 0.36, 1);
+      }
+
+      .probability output {
+        color: var(--muted);
+        font-family: "SFMono-Regular", Consolas, monospace;
+        text-align: right;
+      }
+
+      .system-note {
+        margin: auto 0 0;
+        padding-top: 20px;
+        border-top: 1px solid var(--line);
+        color: #6f727d;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .error-box {
+        display: none;
+        padding: 18px 0;
+        color: #ff8f88;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+
+      .error-box.visible {
+        display: block;
+      }
+
+      .retry {
+        display: none;
+        margin-top: 12px;
+      }
+
+      .retry.visible {
+        display: inline-block;
+      }
+
+      @keyframes enter {
+        from {
+          opacity: 0;
+          transform: translateY(18px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @keyframes drop {
+        0% {
+          opacity: 0.4;
+          transform: translateY(-430%);
+        }
+        72% {
+          transform: translateY(8%);
+        }
+        100% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @keyframes win {
+        to {
+          transform: scale(0.86);
+        }
+      }
+
+      @keyframes pulse {
+        to {
+          opacity: 0.35;
+          transform: scale(0.72);
+        }
+      }
+
+      @media (max-width: 920px) {
+        .shell {
+          width: min(700px, calc(100% - 30px));
+        }
+
+        main {
+          grid-template-columns: 1fr;
+          min-height: auto;
+          gap: 48px;
+          padding-top: 32px;
+        }
+
+        .inspector {
+          min-height: 500px;
+          padding: 32px 0 0;
+          border-top: 1px solid var(--line);
+          border-left: 0;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .shell {
+          width: min(100% - 20px, 520px);
+        }
+
+        header {
+          min-height: 72px;
+        }
+
+        .brand span,
+        .server-state span {
+          display: none;
+        }
+
+        .game-heading {
+          align-items: start;
+          flex-direction: column;
+        }
+
+        .turn-copy {
+          max-width: none;
+          text-align: left;
+        }
+
+        .board {
+          gap: 6px;
+          padding: 9px;
+          border-radius: 16px;
+        }
+
+        .column-numbers {
+          padding-inline: 9px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div class="brand">
+          <strong>System One</strong>
+          <span>Connect Four / 01</span>
+        </div>
+        <div class="server-state">
+          <i class="server-dot" id="server-dot"></i>
+          <span id="server-copy">Checking inference engine</span>
+        </div>
+      </header>
+
+      <main>
+        <section class="game-stage" aria-labelledby="game-title">
+          <div class="game-heading">
+            <div>
+              <div class="eyebrow">Human vs Qwen3.5</div>
+              <h1 id="game-title">Read the board.<br />Make the drop.</h1>
+            </div>
+            <p class="turn-copy" id="turn-copy">
+              You are <strong>coral</strong>. Choose a column to begin.
+            </p>
+          </div>
+
+          <div class="board-wrap">
+            <div class="column-numbers" aria-hidden="true">
+              <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span>
+            </div>
+            <div class="board" id="board" role="grid" aria-label="Connect Four board"></div>
+            <div class="thinking-mark" id="thinking-mark"><i></i> Qwen is reading the position</div>
+          </div>
+
+          <div class="legend">
+            <span><i style="background: var(--human)"></i>You</span>
+            <span><i style="background: var(--qwen)"></i>Qwen</span>
+          </div>
+        </section>
+
+        <aside class="inspector" aria-labelledby="inspector-title">
+          <div class="inspector-head">
+            <div>
+              <div class="eyebrow">Decision trace</div>
+              <h2 id="inspector-title">Move probabilities</h2>
+            </div>
+            <button class="new-game" id="new-game" type="button">New game</button>
+          </div>
+
+          <div class="decision-summary">
+            <div class="metric">
+              <span class="label">Confidence</span>
+              <strong id="confidence">—</strong>
+            </div>
+            <div class="metric">
+              <span class="label">Latency</span>
+              <strong id="latency">—</strong>
+            </div>
+          </div>
+
+          <div class="probabilities" id="probabilities">
+            <p class="empty-state">
+              Qwen’s complete distribution across legal columns will appear here after your first move.
+            </p>
+          </div>
+
+          <div class="error-box" id="error-box"></div>
+          <button class="retry" id="retry" type="button">Retry Qwen move</button>
+          <p class="system-note">
+            Rules run locally in JavaScript. The model receives only legal moves, their resulting boards, and one-ply tactical facts.
+          </p>
+        </aside>
+      </main>
+    </div>
+
+    <script>
+      const ROWS = 6;
+      const COLS = 7;
+      const EMPTY = 0;
+      const HUMAN = 1;
+      const QWEN = 2;
+      const boardElement = document.querySelector("#board");
+      const turnCopy = document.querySelector("#turn-copy");
+      const probabilitiesElement = document.querySelector("#probabilities");
+      const confidenceElement = document.querySelector("#confidence");
+      const latencyElement = document.querySelector("#latency");
+      const thinkingMark = document.querySelector("#thinking-mark");
+      const errorBox = document.querySelector("#error-box");
+      const retryButton = document.querySelector("#retry");
+
+      let board = emptyBoard();
+      let turn = HUMAN;
+      let gameOver = false;
+      let thinking = false;
+      let hoverColumn = null;
+      let lastMove = null;
+      let winningCells = [];
+
+      function emptyBoard() {
+        return Array.from({ length: ROWS }, () => Array(COLS).fill(EMPTY));
+      }
+
+      function verifyRules() {
+        const horizontal = emptyBoard();
+        for (let column = 0; column < 4; column += 1) drop(horizontal, column, HUMAN);
+        if (findWinner(horizontal, HUMAN).length !== 4) {
+          throw new Error("Horizontal win check failed");
+        }
+
+        const vertical = emptyBoard();
+        for (let move = 0; move < 4; move += 1) drop(vertical, 2, QWEN);
+        if (findWinner(vertical, QWEN).length !== 4) {
+          throw new Error("Vertical win check failed");
+        }
+
+        const diagonal = emptyBoard();
+        diagonal[5][0] = HUMAN;
+        diagonal[4][1] = HUMAN;
+        diagonal[3][2] = HUMAN;
+        diagonal[2][3] = HUMAN;
+        if (findWinner(diagonal, HUMAN).length !== 4) {
+          throw new Error("Diagonal win check failed");
+        }
+      }
+
+      function cloneBoard(source) {
+        return source.map((row) => [...row]);
+      }
+
+      function legalColumns(source) {
+        return Array.from({ length: COLS }, (_, column) => column).filter(
+          (column) => source[0][column] === EMPTY,
+        );
+      }
+
+      function drop(source, column, piece) {
+        for (let row = ROWS - 1; row >= 0; row -= 1) {
+          if (source[row][column] === EMPTY) {
+            source[row][column] = piece;
+            return row;
+          }
+        }
+        return -1;
+      }
+
+      function findWinner(source, piece) {
+        const directions = [
+          [0, 1],
+          [1, 0],
+          [1, 1],
+          [1, -1],
+        ];
+        for (let row = 0; row < ROWS; row += 1) {
+          for (let column = 0; column < COLS; column += 1) {
+            if (source[row][column] !== piece) continue;
+            for (const [rowStep, columnStep] of directions) {
+              const cells = Array.from({ length: 4 }, (_, index) => [
+                row + rowStep * index,
+                column + columnStep * index,
+              ]);
+              if (
+                cells.every(
+                  ([candidateRow, candidateColumn]) =>
+                    candidateRow >= 0 &&
+                    candidateRow < ROWS &&
+                    candidateColumn >= 0 &&
+                    candidateColumn < COLS &&
+                    source[candidateRow][candidateColumn] === piece,
+                )
+              ) {
+                return cells;
+              }
+            }
+          }
+        }
+        return [];
+      }
+
+      function boardForApi(source) {
+        return source.map((row) =>
+          row.map((piece) => (piece === HUMAN ? "R" : piece === QWEN ? "Y" : ".")).join(""),
+        );
+      }
+
+      function moveWins(source, column, piece) {
+        const next = cloneBoard(source);
+        drop(next, column, piece);
+        return findWinner(next, piece).length > 0;
+      }
+
+      function render() {
+        boardElement.innerHTML = "";
+        boardElement.classList.toggle("thinking", thinking);
+        thinkingMark.classList.toggle("visible", thinking);
+        const moveToAnimate = lastMove;
+
+        for (let row = 0; row < ROWS; row += 1) {
+          for (let column = 0; column < COLS; column += 1) {
+            const cell = document.createElement("button");
+            cell.type = "button";
+            cell.className = "cell";
+            cell.dataset.column = column;
+            cell.dataset.row = row;
+            cell.setAttribute("role", "gridcell");
+            cell.setAttribute("aria-label", `Row ${row + 1}, column ${column + 1}`);
+            cell.disabled = turn !== HUMAN || thinking || gameOver || board[0][column] !== EMPTY;
+            cell.addEventListener("pointerenter", () => {
+              hoverColumn = column;
+              updatePreview();
+            });
+            cell.addEventListener("click", () => humanMove(column));
+
+            const piece = board[row][column];
+            if (piece !== EMPTY) {
+              const disc = document.createElement("span");
+              disc.className = `disc ${piece === HUMAN ? "human" : "qwen"}`;
+              if (moveToAnimate && moveToAnimate.row === row && moveToAnimate.column === column) {
+                disc.classList.add("drop");
+              }
+              if (winningCells.some(([winRow, winColumn]) => winRow === row && winColumn === column)) {
+                disc.classList.add("winner");
+              }
+              cell.append(disc);
+            }
+            boardElement.append(cell);
+          }
+        }
+        lastMove = null;
+        updatePreview();
+      }
+
+      function updatePreview() {
+        boardElement.querySelectorAll(".cell.preview").forEach((cell) => {
+          cell.classList.remove("preview");
+        });
+        if (hoverColumn === null || turn !== HUMAN || thinking || gameOver) return;
+
+        let row = ROWS - 1;
+        while (row >= 0 && board[row][hoverColumn] !== EMPTY) row -= 1;
+        boardElement
+          .querySelector(`[data-row="${row}"][data-column="${hoverColumn}"]`)
+          ?.classList.add("preview");
+      }
+
+      function humanMove(column) {
+        if (turn !== HUMAN || thinking || gameOver || !legalColumns(board).includes(column)) return;
+        const row = drop(board, column, HUMAN);
+        lastMove = { row, column };
+        if (finishIfNeeded(HUMAN)) return;
+        turn = QWEN;
+        turnCopy.innerHTML = "Qwen is <strong>reading the board</strong> and scoring every legal column.";
+        render();
+        window.setTimeout(qwenMove, 460);
+      }
+
+      function finishIfNeeded(piece) {
+        winningCells = findWinner(board, piece);
+        if (winningCells.length) {
+          gameOver = true;
+          turnCopy.innerHTML =
+            piece === HUMAN
+              ? "<strong>You connected four.</strong> Start a new game to play again."
+              : "<strong>Qwen connected four.</strong> The decision trace shows its final move.";
+          render();
+          return true;
+        }
+        if (!legalColumns(board).length) {
+          gameOver = true;
+          turnCopy.innerHTML = "<strong>Draw.</strong> The board is full.";
+          render();
+          return true;
+        }
+        return false;
+      }
+
+      function criteriaForMoves() {
+        const criteria = {};
+        const immediateHumanThreats = legalColumns(board).filter((column) => moveWins(board, column, HUMAN));
+        for (const column of legalColumns(board)) {
+          const next = cloneBoard(board);
+          const row = drop(next, column, QWEN);
+          const opponentWins = legalColumns(next).filter((reply) => moveWins(next, reply, HUMAN));
+          criteria[`column_${column + 1}`] = {
+            column: column + 1,
+            landing_row: row + 1,
+            wins_immediately: findWinner(next, QWEN).length > 0,
+            blocks_immediate_loss: immediateHumanThreats.includes(column),
+            allows_opponent_immediate_win: opponentWins.length > 0,
+            opponent_winning_replies: opponentWins.map((reply) => reply + 1),
+            distance_from_center: Math.abs(column - 3),
+            resulting_board: boardForApi(next),
+          };
+        }
+        return criteria;
+      }
+
+      async function qwenMove() {
+        if (turn !== QWEN || gameOver || thinking) return;
+        thinking = true;
+        errorBox.classList.remove("visible");
+        retryButton.classList.remove("visible");
+        render();
+        const started = performance.now();
+        try {
+          const response = await fetch("/v1/systemone", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "qwen3.5-0.8b-systemone",
+              state: {
+                game: "Connect Four",
+                board: boardForApi(board),
+                board_format: "Six rows from top to bottom. R is the human, Y is you, and . is empty.",
+                current_player: "Y",
+                objective: "Connect four Y pieces horizontally, vertically, or diagonally before R does.",
+                move_number: board.flat().filter(Boolean).length + 1,
+              },
+              questions: {
+                move: {
+                  type: "choice",
+                  instructions:
+                    "Choose the strongest legal column for Y. Win immediately when possible; otherwise block an immediate loss, avoid giving R a winning reply, and prefer central connected positions.",
+                  criteria: criteriaForMoves(),
+                },
+              },
+            }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+          const answer = result.answers.move;
+          const column = Number(answer.choice.replace("column_", "")) - 1;
+          if (!legalColumns(board).includes(column)) throw new Error("The API selected an illegal column.");
+          showDecision(answer, performance.now() - started);
+          const row = drop(board, column, QWEN);
+          lastMove = { row, column };
+          thinking = false;
+          if (finishIfNeeded(QWEN)) return;
+          turn = HUMAN;
+          turnCopy.innerHTML = `Qwen chose <strong>column ${column + 1}</strong>. Your move.`;
+          render();
+        } catch (error) {
+          thinking = false;
+          errorBox.textContent = `Qwen could not move: ${error.message}`;
+          errorBox.classList.add("visible");
+          retryButton.classList.add("visible");
+          turnCopy.innerHTML = "The inference request failed. <strong>Retry the move</strong> or start over.";
+          render();
+        }
+      }
+
+      function showDecision(answer, elapsed) {
+        confidenceElement.textContent = `${(answer.confidence * 100).toFixed(0)}%`;
+        latencyElement.textContent = `${Math.round(elapsed)}ms`;
+        const entries = Object.entries(answer.probabilities).sort((a, b) => b[1] - a[1]);
+        probabilitiesElement.innerHTML = entries
+          .map(
+            ([option, probability]) => `
+              <div class="probability ${option === answer.choice ? "selected" : ""}">
+                <span>${option.replace("column_", "Column ")}</span>
+                <div class="track"><div class="fill" data-width="${probability * 100}"></div></div>
+                <output>${(probability * 100).toFixed(1)}%</output>
+              </div>`,
+          )
+          .join("");
+        requestAnimationFrame(() => {
+          document.querySelectorAll(".fill").forEach((fill) => {
+            fill.style.width = `${fill.dataset.width}%`;
+          });
+        });
+      }
+
+      function resetGame() {
+        board = emptyBoard();
+        turn = HUMAN;
+        gameOver = false;
+        thinking = false;
+        hoverColumn = null;
+        lastMove = null;
+        winningCells = [];
+        confidenceElement.textContent = "—";
+        latencyElement.textContent = "—";
+        probabilitiesElement.innerHTML =
+          '<p class="empty-state">Qwen’s complete distribution across legal columns will appear here after your first move.</p>';
+        errorBox.classList.remove("visible");
+        retryButton.classList.remove("visible");
+        turnCopy.innerHTML = "You are <strong>coral</strong>. Choose a column to begin.";
+        render();
+      }
+
+      async function checkServer() {
+        const dot = document.querySelector("#server-dot");
+        const copy = document.querySelector("#server-copy");
+        try {
+          const response = await fetch("/readyz");
+          const result = await response.json();
+          if (!result.ready) throw new Error();
+          dot.classList.add("ready");
+          copy.textContent = "Qwen3.5 ready on CUDA";
+        } catch {
+          copy.textContent = "Inference engine unavailable";
+        }
+      }
+
+      document.querySelector("#new-game").addEventListener("click", resetGame);
+      retryButton.addEventListener("click", qwenMove);
+      boardElement.addEventListener("pointerleave", () => {
+        hoverColumn = null;
+        updatePreview();
+      });
+      verifyRules();
+      resetGame();
+      checkServer();
+    </script>
+  </body>
+</html>

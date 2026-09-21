@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse
 from pydantic import ValidationError
 
 from .contract import SystemOneRequest, SystemOneResponse
@@ -13,6 +15,7 @@ from .engine import ContextLimitError, EngineBusyError, InferenceError, get_engi
 MAX_BODY_BYTES = 24 * 1024 * 1024
 
 app = FastAPI(title="Qwen3.5 System One", version="0.1.0")
+CONNECT_FOUR_HTML = Path(__file__).with_name("connect_four.html")
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -66,6 +69,11 @@ def health() -> dict[str, str]:
 @app.get("/readyz")
 def ready() -> dict[str, bool]:
     return {"ready": get_engine().loaded}
+
+
+@app.get("/demos/connect-four", include_in_schema=False)
+def connect_four() -> FileResponse:
+    return FileResponse(CONNECT_FOUR_HTML)
 
 
 @app.post(

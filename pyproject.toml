@@ -1,0 +1,41 @@
+[project]
+name = "qwen3-5-0-8b-systemone"
+version = "0.1.0"
+description = "Local Jev-style decision API powered by Qwen3.5-0.8B"
+readme = "README.md"
+authors = [
+    { name = "Berat Çimen", email = "beratcmn@hotmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "accelerate>=1.10,<2",
+    "fastapi>=0.116,<1",
+    "pillow>=11.3,<13",
+    "pydantic>=2.11,<3",
+    "torch==2.9.1",
+    "torchvision==0.24.1",
+    "transformers==5.17.0",
+    "uvicorn[standard]>=0.35,<1",
+]
+
+[project.scripts]
+qwen3-5-0-8b-systemone = "qwen3_5_0_8b_systemone:main"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest>=8.4,<10",
+]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+
+[build-system]
+requires = ["uv_build>=0.12.17,<0.13.0"]
+build-backend = "uv_build"

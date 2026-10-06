@@ -119,7 +119,28 @@ class SystemOneEngine:
                 low_cpu_mem_usage=True,
             ).to(self.device)
             self.model.eval()
+            self._linearize_patch_embed()
             self.labels = self._verified_labels()
+
+    def _linearize_patch_embed(self) -> None:
+        """Run the vision patch embedding as a matmul.
+
+        Its Conv3d kernel equals its stride and covers each whole patch, so every
+        output is a dot product over one flattened patch. cuDNN picks a
+        pathologically slow bf16 algorithm for this shape here: a 448x112 frame
+        spent 7.6 s in the convolution alone.
+        """
+        import torch.nn.functional as F
+
+        patch_embed = self.model.model.visual.patch_embed
+        weight = patch_embed.proj.weight.reshape(patch_embed.embed_dim, -1)
+        bias = patch_embed.proj.bias
+
+        def forward(hidden_states: Any) -> Any:
+            flat = hidden_states.reshape(-1, weight.shape[1]).to(weight.dtype)
+            return F.linear(flat, weight, bias)
+
+        patch_embed.forward = forward
 
     def _verified_labels(self) -> list[tuple[str, int]]:
         tokenizer = self.processor.tokenizer

@@ -75,5 +75,5 @@ uv run python scripts/benchmark.py --questions 4 --runs 5
 uv run python scripts/benchmark_short.py --runs 12
 ```
 
-The server accepts one active inference request and returns HTTP 529 while the GPU is busy. Set `SYSTEMONE_BATCH_SIZE` to tune the number of question branches evaluated together. The public model alias remains fixed; `SYSTEMONE_MODEL_REVISION` may override the pinned checkpoint revision for compatibility testing.
+The server accepts one active inference request and returns HTTP 529 while the GPU is busy. Set `SYSTEMONE_BATCH_SIZE` to tune the number of question branches evaluated together. Short text-only requests replay captured CUDA graphs; set `SYSTEMONE_CUDA_GRAPHS=0` to use the eager path instead. The public model alias remains fixed; `SYSTEMONE_MODEL_REVISION` may override the pinned checkpoint revision for compatibility testing.
 `SYSTEMONE_IMAGE_MIN_PIXELS` can lower Qwen's image-resize floor for deliberately low-resolution visual-control workloads; the Chrome Dino example uses `4096`.

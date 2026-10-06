@@ -33,6 +33,7 @@ MAX_CONTEXT_TOKENS = 8_192
 MAX_SUFFIX_TOKENS = 65_536
 MAX_DIRECT_INPUT_TOKENS = 128
 MAX_DIRECT_SINGLE_INPUT_TOKENS = 256
+GRAPH_WIDTH_STEP = 16
 
 
 class EngineBusyError(RuntimeError):
@@ -80,7 +81,11 @@ class SystemOneEngine:
         self._inference_lock = threading.Lock()
         self._load_lock = threading.Lock()
         self.batch_size = int(os.getenv("SYSTEMONE_BATCH_SIZE", "16"))
+        self.cuda_graphs = os.getenv("SYSTEMONE_CUDA_GRAPHS", "1") != "0"
+        self._graphs: dict[tuple[int, int], tuple[Any, Any, Any]] = {}
+        self._graph_pool: Any = None
         print(f"Qwen3.5 System One batch size: {self.batch_size}")
+        print(f"Qwen3.5 System One CUDA graphs: {self.cuda_graphs}")
 
     @property
     def loaded(self) -> bool:
@@ -365,6 +370,12 @@ class SystemOneEngine:
     ) -> list[list[float]]:
         import torch
 
+        if self.cuda_graphs and "pixel_values" not in shared_inputs:
+            prefix = tuple(shared_inputs["input_ids"][0].tolist())
+            final_hidden = self._graph_hidden([prefix + item.input_ids for item in batch])
+            if final_hidden is not None:
+                return self._project_candidates(batch, final_hidden)
+
         prefix_ids = shared_inputs["input_ids"]
         prefix_mask = shared_inputs["attention_mask"]
         count = len(batch)
@@ -421,19 +432,90 @@ class SystemOneEngine:
         ].float()
         return self._project_candidates(batch, final_hidden)
 
+    def _graph_hidden(self, rows: list[tuple[int, ...]]) -> Any:
+        """Return each row's final hidden state from a captured text-only forward.
+
+        Rows are right-padded to a width bucket. Every Qwen3.5 layer is causal, so
+        padding after a row's last token cannot change that token, and the forward
+        needs no attention mask. Text-only rope positions are a plain arange. Graphs
+        are keyed by exact batch size because padded rows cost real GPU time once
+        the forward is compute-bound.
+        """
+        import torch
+
+        batch = len(rows)
+        width = -(-max(map(len, rows)) // GRAPH_WIDTH_STEP) * GRAPH_WIDTH_STEP
+        entry = self._graphs.get((batch, width))
+        if entry is None:
+            try:
+                entry = self._capture_graph(batch, width)
+            except Exception as error:
+                print(f"Qwen3.5 System One CUDA graphs disabled: {error!r}")
+                self.cuda_graphs = False
+                self._graphs.clear()
+                return None
+            self._graphs[(batch, width)] = entry
+        graph, input_ids, hidden = entry
+
+        host = torch.full(
+            (batch, width), self.processor.tokenizer.pad_token_id, dtype=torch.long
+        )
+        for index, row in enumerate(rows):
+            host[index, : len(row)] = torch.tensor(row)
+        input_ids.copy_(host)
+        graph.replay()
+        last = torch.tensor([len(row) - 1 for row in rows], device=self.device)
+        return hidden[torch.arange(len(rows), device=self.device), last].float()
+
+    def _capture_graph(self, batch: int, width: int) -> tuple[Any, Any, Any]:
+        import torch
+
+        language_model = self.model.model.language_model
+        if self._graph_pool is None:
+            self._graph_pool = torch.cuda.graph_pool_handle()
+        input_ids = torch.full(
+            (batch, width),
+            self.processor.tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=self.device,
+        )
+        # Warm up on a side stream so cuBLAS workspaces and Triton autotuning
+        # finish before capture.
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream), torch.inference_mode():
+            for _ in range(2):
+                language_model(input_ids=input_ids, use_cache=False)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.inference_mode(), torch.cuda.graph(graph, pool=self._graph_pool):
+            hidden = language_model(
+                input_ids=input_ids, use_cache=False
+            ).last_hidden_state
+        return graph, input_ids, hidden
+
     def _project_candidates(
         self, batch: list[CompiledQuestion], final_hidden: Any
     ) -> list[list[float]]:
         import torch
 
         weight = self.model.lm_head.weight
-        results: list[list[float]] = []
-        for row, item in enumerate(batch):
-            candidate_ids = torch.tensor(item.candidate_token_ids, device=self.device)
-            logits = torch.mv(
-                weight.index_select(0, candidate_ids).float(), final_hidden[row]
+        logits = [
+            torch.mv(
+                weight.index_select(
+                    0, torch.tensor(item.candidate_token_ids, device=self.device)
+                ).float(),
+                final_hidden[row],
             )
-            results.append(logits.cpu().tolist())
+            for row, item in enumerate(batch)
+        ]
+        values = torch.cat(logits).cpu().tolist()
+        results: list[list[float]] = []
+        offset = 0
+        for item in batch:
+            size = len(item.candidate_token_ids)
+            results.append(values[offset : offset + size])
+            offset += size
         return results
 
     def _evaluate_batch(

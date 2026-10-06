@@ -47,9 +47,31 @@ profiled total. Compact prompts reduced the longest suffix from 110 to 64 tokens
 and direct cache expansion reduced cache work from about 9.7 ms to 3.0 ms per
 batch.
 
-Qwen3.5 still reports the reference PyTorch implementations of
-`causal_conv1d_fn` and `chunk_gated_delta_rule` on this Windows installation.
-The current PyPI releases of `causal-conv1d` and `flash-linear-attention` do not
-publish Windows wheels, so this benchmark does not claim fused-kernel speed.
-Use a supported Linux/CUDA environment for those kernels, then rerun the same
-HTTP benchmark to measure the actual gain on that machine.
+## CUDA graphs and fused linear attention
+
+Measured on 2026-10-07 on the same RTX 3060 with the same command plus
+`--questions 1 3 5 10 16 50`. "Before" is the table above; the other columns
+include `flash-linear-attention` running on `triton-windows`.
+
+| Questions | Before median | Graphs off | Graphs on | Speedup vs before | Graphs-on questions/s |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 173.32 ms | 138.60 ms | 20.85 ms | 8.3× | 47.96 |
+| 3 | — | 144.61 ms | 42.71 ms | — | 70.23 |
+| 5 | 169.46 ms | 137.57 ms | 68.19 ms | 2.5× | 73.32 |
+| 10 | 251.18 ms | 135.67 ms | 122.90 ms | 2.0× | 81.37 |
+| 16 | — | 195.18 ms | 181.89 ms | — | 87.97 |
+| 50 | 1003.06 ms | 711.37 ms | 669.13 ms | 1.5× | 74.72 |
+
+A profile of the 1-question request showed about 37 ms of GPU work inside
+170 ms of wall time and about 3,000 kernel launches: the eager forward was
+launch-bound. The single-pass text-only path now replays a CUDA graph captured
+per exact batch size and 16-token width bucket, which removes that overhead.
+Graphs are captured lazily, so the first request of each new shape pays a
+one-time capture cost. `SYSTEMONE_CUDA_GRAPHS=0` restores the eager path.
+
+Beyond a few questions the forward is GPU-bound, and graphs help less. There,
+`chunk_gated_delta_rule` from `flash-linear-attention` replaces the fp32
+reference implementation and cuts GPU time by about 35% at batch 16. Qwen3.5
+still uses the reference `causal_conv1d_fn` because `causal-conv1d` publishes
+no Windows wheels; it is about 10% of GPU time at batch 16. Images, long
+prompts, and multi-batch requests still use the eager shared-prefix path.

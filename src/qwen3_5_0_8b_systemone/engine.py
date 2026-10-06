@@ -32,7 +32,7 @@ ANSWER_PREFIX = "\nAnswer:"
 MAX_CONTEXT_TOKENS = 8_192
 MAX_SUFFIX_TOKENS = 65_536
 MAX_DIRECT_INPUT_TOKENS = 128
-MAX_DIRECT_SINGLE_INPUT_TOKENS = 256
+MAX_DIRECT_SINGLE_INPUT_TOKENS = 2_048
 GRAPH_WIDTH_STEP = 16
 
 
@@ -82,7 +82,7 @@ class SystemOneEngine:
         self._load_lock = threading.Lock()
         self.batch_size = int(os.getenv("SYSTEMONE_BATCH_SIZE", "16"))
         self.cuda_graphs = os.getenv("SYSTEMONE_CUDA_GRAPHS", "1") != "0"
-        self._graphs: dict[tuple[int, int], tuple[Any, Any, Any]] = {}
+        self._graphs: dict[tuple[str, int, int], tuple[Any, dict[str, Any], Any]] = {}
         self._graph_pool: Any = None
         print(f"Qwen3.5 System One batch size: {self.batch_size}")
         print(f"Qwen3.5 System One CUDA graphs: {self.cuda_graphs}")
@@ -440,6 +440,13 @@ class SystemOneEngine:
             token_type_ids[:, :prefix_length] = shared_inputs[name].repeat(count, 1)
             model_inputs[name] = token_type_ids
 
+        if self.cuda_graphs and count == 1:
+            final_hidden = self._graph_hidden_multimodal(
+                input_ids, attention_mask, model_inputs
+            )
+            if final_hidden is not None:
+                return self._project_candidates(batch, final_hidden)
+
         with torch.inference_mode():
             output = self.model.model(
                 input_ids=input_ids,
@@ -466,54 +473,125 @@ class SystemOneEngine:
 
         batch = len(rows)
         width = -(-max(map(len, rows)) // GRAPH_WIDTH_STEP) * GRAPH_WIDTH_STEP
-        entry = self._graphs.get((batch, width))
+        entry = self._graph_entry(
+            ("text", batch, width),
+            lambda: {
+                "input_ids": torch.full(
+                    (batch, width),
+                    self.processor.tokenizer.pad_token_id,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+            },
+        )
         if entry is None:
-            try:
-                entry = self._capture_graph(batch, width)
-            except Exception as error:
-                print(f"Qwen3.5 System One CUDA graphs disabled: {error!r}")
-                self.cuda_graphs = False
-                self._graphs.clear()
-                return None
-            self._graphs[(batch, width)] = entry
-        graph, input_ids, hidden = entry
+            return None
+        graph, inputs, hidden = entry
 
         host = torch.full(
             (batch, width), self.processor.tokenizer.pad_token_id, dtype=torch.long
         )
         for index, row in enumerate(rows):
             host[index, : len(row)] = torch.tensor(row)
-        input_ids.copy_(host)
+        inputs["input_ids"].copy_(host)
         graph.replay()
         last = torch.tensor([len(row) - 1 for row in rows], device=self.device)
         return hidden[torch.arange(len(rows), device=self.device), last].float()
 
-    def _capture_graph(self, batch: int, width: int) -> tuple[Any, Any, Any]:
+    def _graph_hidden_multimodal(
+        self, input_ids: Any, attention_mask: Any, model_inputs: dict[str, Any]
+    ) -> Any:
+        """Return the final hidden state of one image row from a captured forward.
+
+        The vision encoder and multimodal rope positions run eagerly once per
+        request. Only the language model, which dominates, replays as a graph
+        over the merged embeddings, right-padded to a width bucket.
+        """
+        import torch
+
+        model = self.model.model
+        length = int(input_ids.shape[1])
+        width = -(-length // GRAPH_WIDTH_STEP) * GRAPH_WIDTH_STEP
+        hidden_size = model.config.text_config.hidden_size
+        dtype = model.language_model.embed_tokens.weight.dtype
+        entry = self._graph_entry(
+            ("image", 1, width),
+            lambda: {
+                "inputs_embeds": torch.zeros(
+                    (1, width, hidden_size), dtype=dtype, device=self.device
+                ),
+                "position_ids": torch.zeros(
+                    (3, 1, width), dtype=torch.long, device=self.device
+                ),
+            },
+        )
+        if entry is None:
+            return None
+        graph, inputs, hidden = entry
+
+        with torch.inference_mode():
+            embeds = model.get_input_embeddings()(input_ids)
+            if "pixel_values" in model_inputs:
+                image_embeds = model.get_image_features(
+                    model_inputs["pixel_values"],
+                    model_inputs["image_grid_thw"],
+                    return_dict=True,
+                ).pooler_output
+                image_mask = (input_ids == model.config.image_token_id).unsqueeze(-1)
+                embeds = embeds.masked_scatter(
+                    image_mask, torch.cat(image_embeds).to(embeds.dtype)
+                )
+            positions = model.compute_3d_position_ids(
+                input_ids=input_ids,
+                inputs_embeds=embeds,
+                image_grid_thw=model_inputs.get("image_grid_thw"),
+                attention_mask=attention_mask,
+                mm_token_type_ids=model_inputs.get("mm_token_type_ids"),
+            )
+            if positions is None:
+                return None
+            inputs["inputs_embeds"].zero_()
+            inputs["inputs_embeds"][:, :length] = embeds
+            inputs["position_ids"].zero_()
+            inputs["position_ids"][:, :, :length] = positions
+        graph.replay()
+        return hidden[:, length - 1].float()
+
+    def _graph_entry(
+        self, key: tuple[str, int, int], make_inputs: Any
+    ) -> tuple[Any, dict[str, Any], Any] | None:
+        entry = self._graphs.get(key)
+        if entry is None:
+            try:
+                entry = self._capture_graph(make_inputs())
+            except Exception as error:
+                print(f"Qwen3.5 System One CUDA graphs disabled: {error!r}")
+                self.cuda_graphs = False
+                self._graphs.clear()
+                return None
+            self._graphs[key] = entry
+        return entry
+
+    def _capture_graph(
+        self, inputs: dict[str, Any]
+    ) -> tuple[Any, dict[str, Any], Any]:
         import torch
 
         language_model = self.model.model.language_model
         if self._graph_pool is None:
             self._graph_pool = torch.cuda.graph_pool_handle()
-        input_ids = torch.full(
-            (batch, width),
-            self.processor.tokenizer.pad_token_id,
-            dtype=torch.long,
-            device=self.device,
-        )
         # Warm up on a side stream so cuBLAS workspaces and Triton autotuning
         # finish before capture.
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream), torch.inference_mode():
             for _ in range(2):
-                language_model(input_ids=input_ids, use_cache=False)
+                language_model(**inputs, use_cache=False)
         torch.cuda.current_stream().wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.inference_mode(), torch.cuda.graph(graph, pool=self._graph_pool):
-            hidden = language_model(
-                input_ids=input_ids, use_cache=False
-            ).last_hidden_state
-        return graph, input_ids, hidden
+            hidden = language_model(**inputs, use_cache=False).last_hidden_state
+        return graph, inputs, hidden
 
     def _project_candidates(
         self, batch: list[CompiledQuestion], final_hidden: Any

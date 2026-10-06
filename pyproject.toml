@@ -26,6 +26,7 @@ qwen3-5-0-8b-systemone = "qwen3_5_0_8b_systemone:main"
 [dependency-groups]
 dev = [
     "httpx>=0.28,<1",
+    "mss>=10",
     "pytest>=8.4,<10",
 ]
 

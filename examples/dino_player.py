@@ -15,7 +15,8 @@ import uuid
 from ctypes import wintypes
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageGrab, ImageOps
+import mss
+from PIL import Image, ImageDraw, ImageOps
 
 SYSTEMONE_URL = os.getenv(
     "SYSTEMONE_URL", "http://127.0.0.1:8000/v1/systemone"
@@ -26,6 +27,7 @@ TELEMETRY_URL = os.getenv(
 )
 DASHBOARD_URL = TELEMETRY_URL.removesuffix("/v1/dino/telemetry") + "/demos/dino"
 
+SCREEN = mss.MSS()
 VK_SPACE = 0x20
 VK_DOWN = 0x28
 KEYEVENTF_KEYUP = 0x0002
@@ -115,7 +117,11 @@ def tap(key: int, duration: float = 0.035) -> None:
 def capture_frame(
     bbox: tuple[int, int, int, int], width: int, height: int
 ) -> Image.Image:
-    source = ImageGrab.grab(bbox=bbox, all_screens=True)
+    left, top, right, bottom = bbox
+    size = (right - left, bottom - top)
+    # mss captures a region in about 17 ms; PIL's ImageGrab takes about 60 ms.
+    shot = SCREEN.grab({"left": left, "top": top, "width": size[0], "height": size[1]})
+    source = Image.frombytes("RGB", size, shot.rgb)
     try:
         return ImageOps.fit(
             source.convert("RGB"),

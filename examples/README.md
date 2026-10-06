@@ -27,11 +27,19 @@ uv run qwen3-5-0-8b-systemone
 
 The controller asks for the top-left and bottom-right corners of the visible
 playfield. Move the cursor to each corner and press Enter in the terminal. It
-then captures a 128×32 frame, asks the model to choose `wait`, `jump`, `duck`,
-or `restart`, and sends the guarded keyboard action to the focused Chrome
-window. Pass `--frames 2` to use a two-frame 256×32 motion strip at higher
-latency. The first visual request warms the model before the controller starts
-the game.
+then captures an unmodified 512×128 screenshot, asks the model to choose
+`wait`, `jump`, `duck`, or `restart`, and sends the guarded keyboard action to
+the focused Chrome window. Pass `--frames 2` to use a two-frame 1024×128 motion
+strip at higher latency. The first visual request warms the model before the
+controller starts the game.
+
+The prompt states the game's rules and describes each option by what is
+visible, because a 0.8B model cannot reason from a scene to an action in one
+step. At startup the controller also asks the same question about an empty
+frame of the background colour, and divides every later answer by that
+empty-frame answer. This removes the prompt's built-in lean toward one action,
+so only what the screenshot changed decides the move. Pass `--save-frames DIR`
+to keep every frame for later analysis.
 
 Open [http://127.0.0.1:8000/demos/dino](http://127.0.0.1:8000/demos/dino) to
 watch the exact visual input, action probabilities, executed actions, latency,

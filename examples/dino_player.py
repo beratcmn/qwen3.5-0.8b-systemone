@@ -5,6 +5,7 @@ import base64
 import ctypes
 import io
 import json
+import math
 import os
 import statistics
 import time
@@ -25,7 +26,6 @@ TELEMETRY_URL = os.getenv(
 )
 DASHBOARD_URL = TELEMETRY_URL.removesuffix("/v1/dino/telemetry") + "/demos/dino"
 
-SPRITE_CONTRAST = 40
 VK_SPACE = 0x20
 VK_DOWN = 0x28
 KEYEVENTF_KEYUP = 0x0002
@@ -117,19 +117,21 @@ def capture_frame(
 ) -> Image.Image:
     source = ImageGrab.grab(bbox=bbox, all_screens=True)
     try:
-        fitted = ImageOps.fit(
-            source.convert("L"),
+        return ImageOps.fit(
+            source.convert("RGB"),
             (width, height),
             method=Image.Resampling.LANCZOS,
         )
-        # Draw sprites black on white in both light and dark Chrome themes:
-        # anything clearly different from the background brightness is a sprite.
-        background = statistics.median_low(fitted.getdata())
-        return fitted.point(
-            lambda value: 0 if abs(value - background) > SPRITE_CONTRAST else 255
-        ).convert("RGB")
     finally:
         source.close()
+
+
+def blank_like(image: Image.Image) -> Image.Image:
+    """A frame of only the background colour, used to measure the prompt's bias."""
+    channels = [
+        statistics.median_low(band.getdata()) for band in image.convert("RGB").split()
+    ]
+    return Image.new("RGB", image.size, tuple(channels))
 
 
 def motion_strip(
@@ -171,22 +173,28 @@ def decide(
     frame_base64: str, frame_count: int = 1
 ) -> tuple[str, dict[str, float], float, float]:
     visual_description = (
-        "The attached image is the newest game view."
+        "The attached image is a screenshot of the Chrome Dino game."
         if frame_count == 1
         else (
-            "The attached strip contains two consecutive views: the older frame "
-            "is left and the newest frame is right."
+            "The attached strip holds two consecutive screenshots of the Chrome Dino "
+            "game: the older one is left and the newest one is right."
         )
     )
+    # A small model cannot reason from a scene to an action in one step, so the
+    # prompt states the rules and each option describes what is visible.
     payload = {
         "model": "qwen3.5-0.8b-systemone",
         "state": (
-            f"Play Chrome Dino using pixels only. {visual_description} "
-            "The action reaches the game about 0.8 seconds after capture, so act early."
+            f"{visual_description} A dinosaur on the left runs toward cacti and "
+            "birds that move in from the right. Rules: if the words GAME OVER and a "
+            "round restart button are visible, the run has ended and the only correct "
+            "action is restart. Otherwise, jump when a cactus is directly in front of "
+            "the dinosaur, duck when a bird is at head height in front of it, and wait "
+            "when the ground ahead is clear."
         ),
         "attachments": [
             {
-                "id": "motion_strip",
+                "id": "frame",
                 "media_type": "image/png",
                 "data_base64": frame_base64,
             }
@@ -195,19 +203,14 @@ def decide(
             "action": {
                 "type": "choice",
                 "instructions": (
-                    "Choose the safest action for the newest frame, accounting for the "
-                    "control delay."
-                    + (
-                        " Use the older frame only to judge motion and closing distance."
-                        if frame_count == 2
-                        else ""
-                    )
+                    "Which action do the rules require"
+                    + (" for the newest screenshot?" if frame_count == 2 else "?")
                 ),
                 "criteria": {
-                    "wait": "The game is running and no obstacle requires action yet.",
-                    "jump": "A cactus, ground obstacle, or low flyer is close enough to jump now.",
-                    "duck": "A flying obstacle at head height is close enough to duck under now.",
-                    "restart": "The dinosaur has crashed or the game is waiting to start.",
+                    "wait": "The ground directly ahead is clear.",
+                    "jump": "A cactus is directly in front of the dinosaur.",
+                    "duck": "A bird is at head height directly in front of the dinosaur.",
+                    "restart": "The words GAME OVER and a restart button are visible.",
                 },
             }
         },
@@ -217,6 +220,22 @@ def decide(
     latency_ms = (time.perf_counter() - started) * 1000
     answer = result["answers"]["action"]
     return answer["choice"], answer["probabilities"], answer["confidence"], latency_ms
+
+
+def calibrated(
+    probabilities: dict[str, float], baseline: dict[str, float]
+) -> tuple[str, dict[str, float], float]:
+    """Divide out the answer the prompt gives for an empty frame.
+
+    What remains is how much this frame moved each option, so a prompt that
+    always leans toward one action no longer decides the outcome.
+    """
+    ratios = {name: probabilities[name] / baseline[name] for name in probabilities}
+    total = sum(ratios.values())
+    adjusted = {name: value / total for name, value in ratios.items()}
+    entropy = -sum(p * math.log(p) for p in adjusted.values() if p > 0)
+    confidence = max(0.0, 1 - entropy / math.log(len(adjusted)))
+    return max(adjusted, key=adjusted.__getitem__), adjusted, confidence
 
 
 def telemetry(
@@ -271,15 +290,22 @@ def main() -> None:
         description="Play the real Chrome Dino game using visual System One decisions."
     )
     parser.add_argument("--bbox", type=int, nargs=4, metavar=("L", "T", "R", "B"))
-    parser.add_argument("--width", type=int, default=128)
-    parser.add_argument("--height", type=int, default=32)
+    parser.add_argument("--width", type=int, default=512)
+    parser.add_argument("--height", type=int, default=128)
     parser.add_argument("--frames", type=int, choices=(1, 2), default=1)
     parser.add_argument("--frame-gap", type=float, default=0.06)
     parser.add_argument("--threshold", type=float, default=0.35)
     parser.add_argument("--jump-cooldown", type=float, default=0.45)
     parser.add_argument("--interval", type=float, default=0.02)
     parser.add_argument("--no-start", action="store_true")
+    parser.add_argument(
+        "--save-frames",
+        metavar="DIR",
+        help="save every frame as DIR/<sequence>_<action>.png for later analysis",
+    )
     args = parser.parse_args()
+    if args.save_frames:
+        os.makedirs(args.save_frames, exist_ok=True)
 
     bbox = tuple(args.bbox) if args.bbox else calibrate()
     target = root_window_at(bbox)
@@ -301,10 +327,16 @@ def main() -> None:
     )
     try:
         warmup_data = encode_png(warmup_image)
+        blank_data = encode_png(blank_like(warmup_image))
     finally:
         warmup_image.close()
     _, _, _, warmup_latency = decide(warmup_data, args.frames)
     print(f"Visual model ready in {warmup_latency:.0f}ms.")
+    _, baseline, _, _ = decide(blank_data, args.frames)
+    print(
+        "Empty-frame bias: "
+        + "  ".join(f"{name}={value:.2f}" for name, value in baseline.items())
+    )
     user32.SetForegroundWindow(target)
     time.sleep(0.8)
     if not args.no_start:
@@ -333,11 +365,18 @@ def main() -> None:
             )
             try:
                 encoded = encode_png(image)
+                _, raw_probabilities, _, latency_ms = decide(encoded, args.frames)
+                model_action, probabilities, confidence = calibrated(
+                    raw_probabilities, baseline
+                )
+                if args.save_frames:
+                    image.save(
+                        os.path.join(
+                            args.save_frames, f"{sequence + 1:05d}_{model_action}.png"
+                        )
+                    )
             finally:
                 image.close()
-            model_action, probabilities, confidence, latency_ms = decide(
-                encoded, args.frames
-            )
             executed, last_jump, duck_held = execute(
                 model_action,
                 probabilities,

@@ -6,6 +6,7 @@ import ctypes
 import io
 import json
 import os
+import statistics
 import time
 import urllib.error
 import urllib.request
@@ -24,6 +25,7 @@ TELEMETRY_URL = os.getenv(
 )
 DASHBOARD_URL = TELEMETRY_URL.removesuffix("/v1/dino/telemetry") + "/demos/dino"
 
+SPRITE_CONTRAST = 40
 VK_SPACE = 0x20
 VK_DOWN = 0x28
 KEYEVENTF_KEYUP = 0x0002
@@ -120,7 +122,12 @@ def capture_frame(
             (width, height),
             method=Image.Resampling.LANCZOS,
         )
-        return fitted.point(lambda value: 255 if value > 180 else 0).convert("RGB")
+        # Draw sprites black on white in both light and dark Chrome themes:
+        # anything clearly different from the background brightness is a sprite.
+        background = statistics.median_low(fitted.getdata())
+        return fitted.point(
+            lambda value: 0 if abs(value - background) > SPRITE_CONTRAST else 255
+        ).convert("RGB")
     finally:
         source.close()
 

@@ -75,3 +75,33 @@ reference implementation and cuts GPU time by about 35% at batch 16. Qwen3.5
 still uses the reference `causal_conv1d_fn` because `causal-conv1d` publishes
 no Windows wheels; it is about 10% of GPU time at batch 16. Images, long
 prompts, and multi-batch requests still use the eager shared-prefix path.
+
+## Image decisions
+
+Measured on 2026-10-07 on the same RTX 3060 with the Chrome Dino controller's
+request: one 512×128 frame (64 visual tokens) and one four-option Choice
+question, 283 input tokens in total, with `SYSTEMONE_IMAGE_MIN_PIXELS=4096`.
+Times are in-process `evaluate` medians.
+
+| Change | Median |
+| --- | ---: |
+| Starting point (Conv3d patch embedding, two language-model passes) | 732 ms |
+| Patch embedding as a matmul | 330 ms |
+| One direct pass for single questions up to 2,048 tokens | 191 ms |
+| Language-model CUDA graph over merged image embeddings | 83 ms |
+| Vision-encoder CUDA graph with grid-dependent inputs precomputed | 44 ms |
+
+The vision encoder's grid-dependent inputs (position-embedding interpolation,
+rotary positions, and `cu_seqlens`) come from transformers' precompute
+helpers. `cu_seqlens` stays on the CPU because SDPA vision attention reads it
+with `.tolist()`, which would otherwise synchronize during capture.
+
+Two experiments did not pay off. Placing the state text before the image lets
+that text be cached across frames and cut the median to 39 ms, but the model
+read the image noticeably worse: after blank-frame calibration, restart on a
+game-over frame fell from 0.41 to 0.36 and jump with a cactus at the dinosaur
+fell from 0.36 to 0.26, below wait. The image therefore stays first. The
+language model's largest projections reach about 14–15 TFLOPS at this
+sequence length whether cuBLAS selects `s1688` or `s16816` kernels, and neither
+padding the row count nor cuBLASLt changed that, so the remaining matrix
+multiplies are near what this GPU sustains.

@@ -7,6 +7,7 @@ import json
 import os
 import string
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -82,7 +83,7 @@ class SystemOneEngine:
         self._load_lock = threading.Lock()
         self.batch_size = int(os.getenv("SYSTEMONE_BATCH_SIZE", "16"))
         self.cuda_graphs = os.getenv("SYSTEMONE_CUDA_GRAPHS", "1") != "0"
-        self._graphs: dict[tuple[str, int, int], tuple[Any, dict[str, Any], Any]] = {}
+        self._graphs: dict[tuple[Any, ...], tuple[Any, Any, Any]] = {}
         self._graph_pool: Any = None
         print(f"Qwen3.5 System One batch size: {self.batch_size}")
         print(f"Qwen3.5 System One CUDA graphs: {self.cuda_graphs}")
@@ -473,7 +474,9 @@ class SystemOneEngine:
 
         batch = len(rows)
         width = -(-max(map(len, rows)) // GRAPH_WIDTH_STEP) * GRAPH_WIDTH_STEP
+        language_model = self.model.model.language_model
         entry = self._graph_entry(
+            self._graphs,
             ("text", batch, width),
             lambda: {
                 "input_ids": torch.full(
@@ -483,6 +486,7 @@ class SystemOneEngine:
                     device=self.device,
                 )
             },
+            lambda inputs: language_model(**inputs, use_cache=False).last_hidden_state,
         )
         if entry is None:
             return None
@@ -501,20 +505,25 @@ class SystemOneEngine:
     def _graph_hidden_multimodal(
         self, input_ids: Any, attention_mask: Any, model_inputs: dict[str, Any]
     ) -> Any:
-        """Return the final hidden state of one image row from a captured forward.
+        """Return the final hidden state of one image row from captured graphs.
 
-        The vision encoder and multimodal rope positions run eagerly once per
-        request. Only the language model, which dominates, replays as a graph
-        over the merged embeddings, right-padded to a width bucket.
+        The vision encoder replays a graph captured for the image grid. Its
+        output is merged into the token embeddings, multimodal rope positions are
+        computed eagerly, and the language model replays a graph over the merged
+        embeddings, right-padded to a width bucket.
         """
         import torch
 
         model = self.model.model
+        if "pixel_values" not in model_inputs:
+            return None
         length = int(input_ids.shape[1])
         width = -(-length // GRAPH_WIDTH_STEP) * GRAPH_WIDTH_STEP
         hidden_size = model.config.text_config.hidden_size
         dtype = model.language_model.embed_tokens.weight.dtype
+        language_model = model.language_model
         entry = self._graph_entry(
+            self._graphs,
             ("image", 1, width),
             lambda: {
                 "inputs_embeds": torch.zeros(
@@ -524,27 +533,25 @@ class SystemOneEngine:
                     (3, 1, width), dtype=torch.long, device=self.device
                 ),
             },
+            lambda inputs: language_model(**inputs, use_cache=False).last_hidden_state,
         )
         if entry is None:
             return None
         graph, inputs, hidden = entry
 
+        image_embeds = self._image_embeds(
+            model_inputs["pixel_values"], model_inputs["image_grid_thw"]
+        )
+        if image_embeds is None:
+            return None
         with torch.inference_mode():
             embeds = model.get_input_embeddings()(input_ids)
-            if "pixel_values" in model_inputs:
-                image_embeds = model.get_image_features(
-                    model_inputs["pixel_values"],
-                    model_inputs["image_grid_thw"],
-                    return_dict=True,
-                ).pooler_output
-                image_mask = (input_ids == model.config.image_token_id).unsqueeze(-1)
-                embeds = embeds.masked_scatter(
-                    image_mask, torch.cat(image_embeds).to(embeds.dtype)
-                )
+            image_mask = (input_ids == model.config.image_token_id).unsqueeze(-1)
+            embeds = embeds.masked_scatter(image_mask, image_embeds.to(embeds.dtype))
             positions = model.compute_3d_position_ids(
                 input_ids=input_ids,
                 inputs_embeds=embeds,
-                image_grid_thw=model_inputs.get("image_grid_thw"),
+                image_grid_thw=model_inputs["image_grid_thw"],
                 attention_mask=attention_mask,
                 mm_token_type_ids=model_inputs.get("mm_token_type_ids"),
             )
@@ -557,27 +564,85 @@ class SystemOneEngine:
         graph.replay()
         return hidden[:, length - 1].float()
 
+    def _image_embeds(self, pixel_values: Any, grid_thw: Any) -> Any:
+        """Run the vision encoder from a graph captured for this image grid.
+
+        Everything that depends only on the grid is computed once before capture.
+        `cu_seqlens` stays on the CPU because SDPA vision attention reads its
+        segment lengths with `.tolist()`, which would otherwise synchronize.
+        """
+        import torch
+        from transformers.vision_utils import (
+            get_vision_attention_seqlens,
+            get_vision_interpolation_indices_and_weights,
+            get_vision_position_ids,
+        )
+
+        visual = self.model.model.visual
+
+        def make_inputs() -> dict[str, Any]:
+            indices, weights = get_vision_interpolation_indices_and_weights(
+                grid_thw,
+                num_grid_per_side=visual.num_grid_per_side,
+                mode=visual.interpolation_mode,
+                align_corners=visual.interpolation_align_corners,
+                spatial_merge_size=visual.spatial_merge_size,
+            )
+            cu_seqlens, _ = get_vision_attention_seqlens(grid_thw, visual.config)
+            return {
+                "pixel_values": torch.empty(
+                    pixel_values.shape, dtype=visual.dtype, device=self.device
+                ),
+                "precomputed": {
+                    "interp_indices": indices,
+                    "interp_weights": weights,
+                    "position_ids": get_vision_position_ids(
+                        grid_thw, visual.spatial_merge_size
+                    ),
+                    "cu_seqlens": cu_seqlens.cpu(),
+                },
+            }
+
+        entry = self._graph_entry(
+            self._graphs,
+            ("vision", *grid_thw.flatten().tolist(), *pixel_values.shape),
+            make_inputs,
+            # The helpers pop precomputed values, so each call gets a fresh dict.
+            lambda inputs: visual(
+                inputs["pixel_values"], grid_thw=grid_thw, **dict(inputs["precomputed"])
+            ).pooler_output,
+        )
+        if entry is None:
+            return None
+        graph, inputs, merged = entry
+        inputs["pixel_values"].copy_(pixel_values)
+        graph.replay()
+        return merged
+
     def _graph_entry(
-        self, key: tuple[str, int, int], make_inputs: Any
-    ) -> tuple[Any, dict[str, Any], Any] | None:
-        entry = self._graphs.get(key)
+        self,
+        store: dict[Any, tuple[Any, Any, Any]],
+        key: Any,
+        make_inputs: Callable[[], Any],
+        run: Callable[[Any], Any],
+    ) -> tuple[Any, Any, Any] | None:
+        entry = store.get(key)
         if entry is None:
             try:
-                entry = self._capture_graph(make_inputs())
+                inputs = make_inputs()
+                graph, output = self._capture_graph(lambda: run(inputs))
             except Exception as error:
                 print(f"Qwen3.5 System One CUDA graphs disabled: {error!r}")
                 self.cuda_graphs = False
                 self._graphs.clear()
                 return None
-            self._graphs[key] = entry
+            entry = (graph, inputs, output)
+            store[key] = entry
         return entry
 
-    def _capture_graph(
-        self, inputs: dict[str, Any]
-    ) -> tuple[Any, dict[str, Any], Any]:
+    def _capture_graph(self, run: Callable[[], Any]) -> tuple[Any, Any]:
         import torch
 
-        language_model = self.model.model.language_model
         if self._graph_pool is None:
             self._graph_pool = torch.cuda.graph_pool_handle()
         # Warm up on a side stream so cuBLAS workspaces and Triton autotuning
@@ -586,12 +651,12 @@ class SystemOneEngine:
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream), torch.inference_mode():
             for _ in range(2):
-                language_model(**inputs, use_cache=False)
+                run()
         torch.cuda.current_stream().wait_stream(stream)
         graph = torch.cuda.CUDAGraph()
         with torch.inference_mode(), torch.cuda.graph(graph, pool=self._graph_pool):
-            hidden = language_model(**inputs, use_cache=False).last_hidden_state
-        return graph, inputs, hidden
+            output = run()
+        return graph, output
 
     def _project_candidates(
         self, batch: list[CompiledQuestion], final_hidden: Any
